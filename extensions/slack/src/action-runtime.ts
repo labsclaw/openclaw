@@ -9,6 +9,7 @@ import { parseSlackBlocksInput } from "./blocks-input.js";
 import { SLACK_TEXT_LIMIT } from "./limits.js";
 import { resolveSlackChannelConfig } from "./monitor/channel-config.js";
 import { isSlackChannelAllowedByPolicy } from "./monitor/policy.js";
+import { hasSlackNativeDataBlock } from "./native-data-blocks.js";
 import {
   createActionGate,
   imageResultFromFile,
@@ -345,15 +346,17 @@ export async function handleSlackAction(
           ...(textIsSlackMrkdwn ? { textIsSlackMrkdwn: true } : {}),
         };
         const sendContentAndBlocks = async () => {
-          if (content && (separateTextAndBlocks || content.length > SLACK_TEXT_LIMIT)) {
-            // Reuse the resolved thread for both sends. Invoking the action twice
-            // could consume replyToMode=first and move the full text off-thread.
-            const { replyBroadcast: _replyBroadcast, ...blockSendOpts } = sendOpts;
-            await slackActionRuntime.sendSlackMessage(to, "", {
-              ...blockSendOpts,
+          const nativeDataOwnsChunking = hasSlackNativeDataBlock(blocks);
+          if (
+            content &&
+            (separateTextAndBlocks ||
+              (content.length > SLACK_TEXT_LIMIT && !nativeDataOwnsChunking))
+          ) {
+            return await slackActionRuntime.sendSlackMessage(to, content, {
+              ...sendOpts,
               blocks,
+              separateTextAndBlocks: true,
             });
-            return await slackActionRuntime.sendSlackMessage(to, content, sendOpts);
           }
           return await slackActionRuntime.sendSlackMessage(to, content ?? "", {
             ...sendOpts,
