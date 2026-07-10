@@ -6,6 +6,7 @@ import { isSingleUseReplyToMode } from "openclaw/plugin-sdk/reply-reference";
 import { resolveOpenProviderRuntimeGroupPolicy } from "openclaw/plugin-sdk/runtime-group-policy";
 import type { ResolvedSlackAccount } from "./accounts.js";
 import { parseSlackBlocksInput } from "./blocks-input.js";
+import { SLACK_TEXT_LIMIT } from "./limits.js";
 import { resolveSlackChannelConfig } from "./monitor/channel-config.js";
 import { isSlackChannelAllowedByPolicy } from "./monitor/policy.js";
 import {
@@ -318,6 +319,7 @@ export async function handleSlackAction(
         const blocks = readSlackBlocksParam(params);
         const replyBroadcast = readBooleanParam(params, "replyBroadcast");
         const textIsSlackMrkdwn = readBooleanParam(params, "textIsSlackMrkdwn");
+        const separateTextAndBlocks = readBooleanParam(params, "separateTextAndBlocks");
         if (!content && !mediaUrl && !blocks) {
           throw new Error("Slack sendMessage requires content, blocks, or mediaUrl.");
         }
@@ -342,23 +344,37 @@ export async function handleSlackAction(
           ...(replyBroadcast ? { replyBroadcast } : {}),
           ...(textIsSlackMrkdwn ? { textIsSlackMrkdwn: true } : {}),
         };
-        const result =
-          mediaUrl && blocks
-            ? await (async () => {
+        const sendContentAndBlocks = async () => {
+          if (content && (separateTextAndBlocks || content.length > SLACK_TEXT_LIMIT)) {
+            // Reuse the resolved thread for both sends. Invoking the action twice
+            // could consume replyToMode=first and move the full text off-thread.
+            const { replyBroadcast: _replyBroadcast, ...blockSendOpts } = sendOpts;
+            await slackActionRuntime.sendSlackMessage(to, "", {
+              ...blockSendOpts,
+              blocks,
+            });
+            return await slackActionRuntime.sendSlackMessage(to, content, sendOpts);
+          }
+          return await slackActionRuntime.sendSlackMessage(to, content ?? "", {
+            ...sendOpts,
+            blocks,
+          });
+        };
+        const result = blocks
+          ? await (async () => {
+              if (mediaUrl) {
                 await slackActionRuntime.sendSlackMessage(to, "", {
                   ...sendOpts,
                   mediaUrl,
                 });
-                return await slackActionRuntime.sendSlackMessage(to, content ?? "", {
-                  ...sendOpts,
-                  blocks,
-                });
-              })()
-            : await slackActionRuntime.sendSlackMessage(to, content ?? "", {
-                ...sendOpts,
-                mediaUrl: mediaUrl ?? undefined,
-                blocks,
-              });
+              }
+              return await sendContentAndBlocks();
+            })()
+          : await slackActionRuntime.sendSlackMessage(to, content ?? "", {
+              ...sendOpts,
+              mediaUrl: mediaUrl ?? undefined,
+              blocks,
+            });
 
         // Keep "first" mode consistent even when the agent explicitly provided
         // threadTs: once we send a message to the current channel, consider the
