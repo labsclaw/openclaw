@@ -561,10 +561,22 @@ export const feishuOutbound: ChannelOutboundAdapter = {
       return await sendFeishuFallbackPayload({ ctx, payload: fallbackPayload });
     }
 
-    const { replyToMessageId, replyInThread } = resolveFeishuMediaReplyMode({
+    const { normalizedReplyToId } = resolveFeishuMediaReplyMode({
       replyToId: ctx.replyToId,
       threadId: ctx.threadId,
     });
+    // Media and the final card are separate payloads: consume an implicit
+    // first-reply id once, while an explicit thread remains sticky for both.
+    const nextReplyToId = createReplyToFanout({
+      replyToId: normalizedReplyToId,
+      replyToIdSource: ctx.replyToIdSource,
+      replyToMode: ctx.replyToMode,
+    });
+    const nextReplyMode = () =>
+      resolveFeishuMediaReplyMode({
+        replyToId: nextReplyToId(),
+        threadId: ctx.threadId,
+      });
     const mediaUrls = normalizeStringEntries(resolvePayloadMediaUrls(payload));
     return attachChannelToResult(
       "feishu",
@@ -577,27 +589,32 @@ export const feishuOutbound: ChannelOutboundAdapter = {
         onResult: async (deliveryResult) => {
           await ctx.onDeliveryResult?.(attachChannelToResult("feishu", deliveryResult));
         },
-        send: async ({ mediaUrl }) =>
-          await sendMediaFeishu({
+        send: async ({ mediaUrl }) => {
+          const { replyToMessageId, replyInThread } = nextReplyMode();
+          return await sendMediaFeishu({
             cfg: ctx.cfg,
             to: ctx.to,
             mediaUrl,
             accountId: ctx.accountId ?? undefined,
             mediaLocalRoots: ctx.mediaLocalRoots,
             replyToMessageId,
+            replyInThread,
             ...(payload.audioAsVoice === true || ctx.audioAsVoice === true
               ? { audioAsVoice: true }
               : {}),
-          }),
-        finalize: async () =>
-          await sendCardFeishu({
+          });
+        },
+        finalize: async () => {
+          const { replyToMessageId, replyInThread } = nextReplyMode();
+          return await sendCardFeishu({
             cfg: ctx.cfg,
             to: ctx.to,
             card,
             replyToMessageId,
             replyInThread,
             accountId: ctx.accountId ?? undefined,
-          }),
+          });
+        },
       }),
     );
   },
